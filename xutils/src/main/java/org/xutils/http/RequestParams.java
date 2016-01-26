@@ -1,5 +1,6 @@
 package org.xutils.http;
 
+import android.os.Parcelable;
 import android.text.TextUtils;
 
 import org.json.JSONArray;
@@ -13,6 +14,7 @@ import org.xutils.http.app.DefaultParamsBuilder;
 import org.xutils.http.app.HttpRetryHandler;
 import org.xutils.http.app.ParamsBuilder;
 import org.xutils.http.app.RedirectHandler;
+import org.xutils.http.app.RequestTracker;
 import org.xutils.http.body.BodyItemWrapper;
 import org.xutils.http.body.FileBody;
 import org.xutils.http.body.InputStreamBody;
@@ -27,6 +29,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.net.Proxy;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -80,8 +83,10 @@ public class RequestParams {
     private String saveFilePath; // 下载文件时文件保存的路径和文件名
     private boolean multipart = false; // 是否强制使用multipart表单
     private boolean cancelFast = false; // 是否可以被立即停止, true: 为请求创建新的线程, 取消时请求线程被立即中断.
+    private int loadingUpdateMaxTimeSpan = 300; // 进度刷新最大间隔时间(ms)
     private HttpRetryHandler httpRetryHandler; // 自定义HttpRetryHandler
     private RedirectHandler redirectHandler; // 自定义重定向接口, 默认系统自动重定向.
+    private RequestTracker requestTracker; // 自定义日志记录接口.
 
     /**
      * 使用空构造创建时必须, 必须是带有@HttpRequest注解的子类.
@@ -113,8 +118,10 @@ public class RequestParams {
         this.builder = builder;
     }
 
-    // invoke via UriRequest#<init>()
+    // invoke via HttpTask#createNewRequest
     /*package*/ void init() throws Throwable {
+        if (!TextUtils.isEmpty(buildUri)) return;
+
         if (TextUtils.isEmpty(uri) && getHttpRequest() == null) {
             throw new IllegalStateException("uri is empty && @HttpRequest == null");
         }
@@ -362,6 +369,19 @@ public class RequestParams {
         this.cancelFast = cancelFast;
     }
 
+    public int getLoadingUpdateMaxTimeSpan() {
+        return loadingUpdateMaxTimeSpan;
+    }
+
+    /**
+     * 进度刷新最大间隔时间(默认300毫秒)
+     *
+     * @param loadingUpdateMaxTimeSpan
+     */
+    public void setLoadingUpdateMaxTimeSpan(int loadingUpdateMaxTimeSpan) {
+        this.loadingUpdateMaxTimeSpan = loadingUpdateMaxTimeSpan;
+    }
+
     public HttpRetryHandler getHttpRetryHandler() {
         return httpRetryHandler;
     }
@@ -381,6 +401,14 @@ public class RequestParams {
      */
     public void setRedirectHandler(RedirectHandler redirectHandler) {
         this.redirectHandler = redirectHandler;
+    }
+
+    public RequestTracker getRequestTracker() {
+        return requestTracker;
+    }
+
+    public void setRequestTracker(RequestTracker requestTracker) {
+        this.requestTracker = requestTracker;
     }
 
     /**
@@ -700,31 +728,48 @@ public class RequestParams {
     }
 
     private void initEntityParams() {
-        addEntityParams2Map(this.getClass());
+        resolveKVPairs(this, this.getClass(), new ResolveKVListener() {
+            @Override
+            public void onReadKV(String name, Object value) {
+                addParameter(name, value);
+            }
+        });
     }
 
-    private void addEntityParams2Map(Class<?> type) {
+    private interface ResolveKVListener {
+        void onReadKV(String name, Object value);
+    }
+
+    private void resolveKVPairs(Object entity, Class<?> type, ResolveKVListener listener) {
         if (type == null || type == RequestParams.class || type == Object.class) {
             return;
+        } else {
+            ClassLoader cl = type.getClassLoader();
+            if (cl == null || cl == Integer.class.getClassLoader()) {
+                return;
+            }
         }
 
         Field[] fields = type.getDeclaredFields();
         if (fields != null && fields.length > 0) {
             for (Field field : fields) {
-                field.setAccessible(true);
-                try {
-                    String name = field.getName();
-                    Object value = field.get(this);
-                    if (value != null) {
-                        this.addParameter(name, value);
+                if (!Modifier.isTransient(field.getModifiers())
+                        && field.getType() != Parcelable.Creator.class) {
+                    field.setAccessible(true);
+                    try {
+                        String name = field.getName();
+                        Object value = field.get(entity);
+                        if (value != null) {
+                            listener.onReadKV(name, value);
+                        }
+                    } catch (IllegalAccessException ex) {
+                        LogUtil.e(ex.getMessage(), ex);
                     }
-                } catch (IllegalAccessException ex) {
-                    LogUtil.e(ex.getMessage(), ex);
                 }
             }
         }
 
-        addEntityParams2Map(type.getSuperclass());
+        resolveKVPairs(entity, type.getSuperclass(), listener);
     }
 
     private boolean invokedGetHttpRequest = false;
@@ -772,6 +817,27 @@ public class RequestParams {
         }
     }
 
+    private Object parseJSONObject(Object value) {
+        Object result = value;
+        ClassLoader cl = value.getClass().getClassLoader();
+        if (cl != null && cl != Integer.class.getClassLoader()) {
+            final JSONObject jo = new JSONObject();
+            resolveKVPairs(value, value.getClass(), new ResolveKVListener() {
+                @Override
+                public void onReadKV(String name, Object value) {
+                    try {
+                        value = parseJSONObject(value);
+                        jo.put(name, value);
+                    } catch (JSONException ex) {
+                        LogUtil.e(ex.getMessage(), ex);
+                    }
+                }
+            });
+            result = jo;
+        }
+        return result;
+    }
+
     private void params2Json(final JSONObject jsonObject, final List<KeyValue> paramList) throws JSONException {
         HashSet<String> arraySet = new HashSet<String>(paramList.size());
         LinkedHashMap<String, JSONArray> tempData = new LinkedHashMap<String, JSONArray>(paramList.size());
@@ -787,7 +853,8 @@ public class RequestParams {
                 ja = new JSONArray();
                 tempData.put(key, ja);
             }
-            ja.put(kv.value);
+
+            ja.put(parseJSONObject(kv.value));
 
             if (kv instanceof ArrayItem) {
                 arraySet.add(key);

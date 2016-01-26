@@ -26,6 +26,7 @@ import org.xutils.x;
 import java.io.File;
 import java.io.IOException;
 import java.lang.ref.WeakReference;
+import java.lang.reflect.Type;
 import java.util.HashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicLong;
@@ -38,6 +39,7 @@ import java.util.concurrent.atomic.AtomicLong;
         Callback.PrepareCallback<File, Drawable>,
         Callback.CacheCallback<Drawable>,
         Callback.ProgressCallback<Drawable>,
+        Callback.TypedCallback<Drawable>,
         Callback.Cancelable {
 
     private MemCacheKey key;
@@ -56,7 +58,7 @@ import java.util.concurrent.atomic.AtomicLong;
     private Callback.ProgressCallback<Drawable> progressCallback;
 
     private final static String DISK_CACHE_DIR_NAME = "xUtils_img";
-    private final static Executor EXECUTOR = new PriorityExecutor(10);
+    private final static Executor EXECUTOR = new PriorityExecutor(10, false);
     private final static int MEM_CACHE_MIN_SIZE = 1024 * 1024 * 4; // 4M
     private final static LruCache<MemCacheKey, Drawable> MEM_CACHE =
             new LruCache<MemCacheKey, Drawable>(MEM_CACHE_MIN_SIZE) {
@@ -374,6 +376,13 @@ import java.util.concurrent.atomic.AtomicLong;
         }
     }
 
+    private static final Type loadType = File.class;
+
+    @Override
+    public Type getLoadType() {
+        return loadType;
+    }
+
     @Override
     public Drawable prepare(File rawData) {
         if (!validView4Callback(true)) return null;
@@ -440,7 +449,13 @@ import java.util.concurrent.atomic.AtomicLong;
 
         if (ex instanceof FileLockedException) {
             LogUtil.d("ImageFileLocked: " + key.url);
-            doBind(viewRef.get(), key.url, options, callback);
+            x.task().postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    doBind(viewRef.get(), key.url, options, callback);
+
+                }
+            }, 10);
             return;
         }
 
@@ -516,6 +531,9 @@ import java.util.concurrent.atomic.AtomicLong;
         if (view != null) {
             view.setScaleType(options.getImageScaleType());
             if (drawable instanceof GifDrawable) {
+                if (view.getScaleType() == ImageView.ScaleType.CENTER) {
+                    view.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+                }
                 view.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
             }
             if (options.getAnimation() != null) {

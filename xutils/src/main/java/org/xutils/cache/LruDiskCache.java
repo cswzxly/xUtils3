@@ -36,12 +36,16 @@ public final class LruDiskCache {
     private static final int LOCK_WAIT = 1000 * 3; // 3s
     private static final String CACHE_DIR_NAME = "xUtils_cache";
     private static final String TEMP_FILE_SUFFIX = ".tmp";
-    private static final Executor trimExecutor = new PriorityExecutor(1);
 
     private boolean available = false;
     private final DbManager cacheDb;
     private File cacheDir;
     private long diskCacheSize = LIMIT_SIZE;
+    private final Executor trimExecutor = new PriorityExecutor(1, true);
+
+    // delete expires
+    private long lastDeleteExpiryTime = 0L;
+    private static final long DELETE_EXPIRY_SPAN = 1000;
 
     public synchronized static LruDiskCache getDiskCache(String dirName) {
         if (TextUtils.isEmpty(dirName)) dirName = CACHE_DIR_NAME;
@@ -77,8 +81,6 @@ public final class LruDiskCache {
     public DiskCacheEntity get(String key) {
         if (!available || TextUtils.isEmpty(key)) return null;
 
-        deleteExpiry();
-
         DiskCacheEntity result = null;
         try {
             result = this.cacheDb.selector(DiskCacheEntity.class)
@@ -89,6 +91,11 @@ public final class LruDiskCache {
 
         // update hint & lastAccess...
         if (result != null) {
+
+            if (result.getExpires() < System.currentTimeMillis()) {
+                return null;
+            }
+
             result.setHits(result.getHits() + 1);
             result.setLastAccess(System.currentTimeMillis());
             try {
@@ -122,8 +129,6 @@ public final class LruDiskCache {
         if (!available || TextUtils.isEmpty(key)) {
             return null;
         }
-
-        deleteExpiry();
 
         DiskCacheFile result = null;
         DiskCacheEntity entity = get(key);
@@ -234,6 +239,9 @@ public final class LruDiskCache {
             public void run() {
                 if (available) {
 
+                    // trim expires
+                    deleteExpiry();
+
                     // trim db
                     try {
                         int count = (int) cacheDb.selector(DiskCacheEntity.class).count();
@@ -288,6 +296,13 @@ public final class LruDiskCache {
     }
 
     private void deleteExpiry() {
+        long current = System.currentTimeMillis();
+        if (current - lastDeleteExpiryTime < DELETE_EXPIRY_SPAN) {
+            return;
+        } else {
+            lastDeleteExpiryTime = current;
+        }
+
         try {
             WhereBuilder whereBuilder = WhereBuilder.b("expires", "<", System.currentTimeMillis());
             List<DiskCacheEntity> rmList = cacheDb.selector(DiskCacheEntity.class).where(whereBuilder).findAll();

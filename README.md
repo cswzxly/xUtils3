@@ -11,7 +11,7 @@
 
 #### 使用Gradle构建时添加一下依赖即可:
 ```javascript
-compile 'org.xutils:xutils:3.1.22'
+compile 'org.xutils:xutils:3.2.8'
 ```
 ##### 如果使用eclipse可以 [点击这里下载aar文件](http://dl.bintray.com/wyouflf/maven/org/xutils/xutils/), 然后用zip解压, 取出jar包和so文件.
 ##### 混淆配置参考示例项目sample的配置
@@ -39,16 +39,9 @@ public void onCreate() {
 ```java
 /**
  * 1. 方法必须私有限定,
- * 2. 方法以Click或Event结尾, 方便配置混淆编译参数 :
- * -keepattributes *Annotation*
- * -keepclassmembers class * {
- * void *(android.view.View);
- * *** *Click(...);
- * *** *Event(...);
- * }
- * 3. 方法参数形式必须和type对应的Listener接口一致.
- * 4. 注解参数value支持数组: value={id1, id2, id3}
- * 5. 其它参数说明见{@link org.xutils.event.annotation.Event}类的说明.
+ * 2. 方法参数形式必须和type对应的Listener接口一致.
+ * 3. 注解参数value支持数组: value={id1, id2, id3}
+ * 4. 其它参数说明见{@link org.xutils.event.annotation.Event}类的说明.
  **/
 @Event(value = R.id.btn_test_baidu1,
         type = View.OnClickListener.class/*可选参数, 默认是View.OnClickListener.class*/)
@@ -104,9 +97,9 @@ Callback.Cancelable cancelable
         *
         * 3. 请求过程拦截或记录日志: 参考 {@link org.xutils.http.app.RequestTracker}
         *
-        * 4. 请求Header获取: 参考 {@link org.xutils.http.app.InterceptRequestListener}
+        * 4. 请求Header获取: 参考 {@link org.xutils.http.app.RequestInterceptListener}
         *
-        * 5. 其他(线程池, 超时, 重定向, 重试, 代理等): 参考 {@link org.xutils.http.RequestParams
+        * 5. 其他(线程池, 超时, 重定向, 重试, 代理等): 参考 {@link org.xutils.http.RequestParams}
         *
         **/
        new Callback.CommonCallback<String>() {
@@ -141,11 +134,7 @@ Callback.Cancelable cancelable
            }
        });
 
-// cancelable.cancel(); // 取消
-// 如果需要记录请求的日志, 可使用RequestTracker接口(优先级依次降低, 找到一个实现后会忽略后面的):
-// 1. 自定义Callback同时实现RequestTracker接口;
-// 2. 自定义ResponseParser同时实现RequestTracker接口;
-// 3. 在LoaderFactory注册.
+// cancelable.cancel(); // 取消请求
 ```
 #### 如果你只需要一个简单的版本:
 ```java

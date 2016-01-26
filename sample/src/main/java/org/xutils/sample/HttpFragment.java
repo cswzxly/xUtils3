@@ -9,7 +9,7 @@ import org.xutils.common.Callback;
 import org.xutils.ex.DbException;
 import org.xutils.ex.HttpException;
 import org.xutils.http.RequestParams;
-import org.xutils.sample.download.DownloadService;
+import org.xutils.sample.download.DownloadManager;
 import org.xutils.sample.http.BaiduParams;
 import org.xutils.sample.http.BaiduResponse;
 import org.xutils.view.annotation.ContentView;
@@ -31,16 +31,9 @@ public class HttpFragment extends BaseFragment {
 
     /**
      * 1. 方法必须私有限定,
-     * 2. 方法以Click或Event结尾, 方便配置混淆编译参数 :
-     * -keepattributes *Annotation*
-     * -keepclassmembers class * {
-     * void *(android.view.View);
-     * *** *Click(...);
-     * *** *Event(...);
-     * }
-     * 3. 方法参数形式必须和type对应的Listener接口一致.
-     * 4. 注解参数value支持数组: value={id1, id2, id3}
-     * 5. 其它参数说明见{@link org.xutils.view.annotation.Event}类的说明.
+     * 2. 方法参数形式必须和type对应的Listener接口一致.
+     * 3. 注解参数value支持数组: value={id1, id2, id3}
+     * 4. 其它参数说明见{@link org.xutils.view.annotation.Event}类的说明.
      **/
     @Event(value = R.id.btn_test1,
             type = View.OnClickListener.class/*可选参数, 默认是View.OnClickListener.class*/)
@@ -98,7 +91,7 @@ public class HttpFragment extends BaseFragment {
                  *
                  * 3. 请求过程拦截或记录日志: 参考 {@link org.xutils.http.app.RequestTracker}
                  *
-                 * 4. 请求Header获取: 参考 {@link org.xutils.http.app.InterceptRequestListener}
+                 * 4. 请求Header获取: 参考 {@link org.xutils.http.app.RequestInterceptListener}
                  *
                  * 5. 其他(线程池, 超时, 重定向, 重试, 代理等): 参考 {@link org.xutils.http.RequestParams}
                  *
@@ -134,11 +127,7 @@ public class HttpFragment extends BaseFragment {
                     }
                 });
 
-        // cancelable.cancel(); // 取消
-        // 如果需要记录请求的日志, 可使用RequestTracker接口(优先级依次降低, 找到一个实现后会忽略后面的):
-        // 1. 自定义Callback同时实现RequestTracker接口;
-        // 2. 自定义ResponseParser同时实现RequestTracker接口;
-        // 3. 在LoaderFactory注册.
+        // cancelable.cancel(); // 取消请求
     }
 
     // 上传多文件示例
@@ -194,7 +183,7 @@ public class HttpFragment extends BaseFragment {
         for (int i = 0; i < 5; i++) {
             String url = et_url.getText().toString();
             String label = i + "xUtils_" + System.nanoTime();
-            DownloadService.getDownloadManager().startDownload(
+            DownloadManager.getInstance().startDownload(
                     url, label,
                     "/sdcard/xUtils/" + label + ".aar", true, false, null);
         }

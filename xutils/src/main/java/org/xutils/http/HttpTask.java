@@ -1,5 +1,7 @@
 package org.xutils.http;
 
+import android.text.TextUtils;
+
 import org.xutils.common.Callback;
 import org.xutils.common.task.AbsTask;
 import org.xutils.common.task.Priority;
@@ -10,8 +12,8 @@ import org.xutils.common.util.ParameterizedTypeUtil;
 import org.xutils.ex.HttpException;
 import org.xutils.ex.HttpRedirectException;
 import org.xutils.http.app.HttpRetryHandler;
-import org.xutils.http.app.InterceptRequestListener;
 import org.xutils.http.app.RedirectHandler;
+import org.xutils.http.app.RequestInterceptListener;
 import org.xutils.http.app.RequestTracker;
 import org.xutils.http.request.UriRequest;
 import org.xutils.http.request.UriRequestFactory;
@@ -19,7 +21,9 @@ import org.xutils.x;
 
 import java.io.Closeable;
 import java.io.File;
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Type;
+import java.util.HashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -45,7 +49,7 @@ public class HttpTask<ResultType> extends AbsTask<ResultType> implements Progres
     private Callback.CacheCallback<ResultType> cacheCallback;
     private Callback.PrepareCallback prepareCallback;
     private Callback.ProgressCallback progressCallback;
-    private InterceptRequestListener interceptRequestListener;
+    private RequestInterceptListener requestInterceptListener;
 
     // 日志追踪
     private RequestTracker tracker;
@@ -55,8 +59,12 @@ public class HttpTask<ResultType> extends AbsTask<ResultType> implements Progres
     private final static int MAX_FILE_LOAD_WORKER = 3;
     private final static AtomicInteger sCurrFileLoadCount = new AtomicInteger(0);
 
-    private static final PriorityExecutor HTTP_EXECUTOR = new PriorityExecutor(5);
-    private static final PriorityExecutor CACHE_EXECUTOR = new PriorityExecutor(5);
+    // 文件下载任务
+    private static final HashMap<String, WeakReference<HttpTask<?>>>
+            DOWNLOAD_TASK = new HashMap<String, WeakReference<HttpTask<?>>>(1);
+
+    private static final PriorityExecutor HTTP_EXECUTOR = new PriorityExecutor(5, true);
+    private static final PriorityExecutor CACHE_EXECUTOR = new PriorityExecutor(5, true);
 
 
     public HttpTask(RequestParams params, Callback.Cancelable cancelHandler,
@@ -78,8 +86,23 @@ public class HttpTask<ResultType> extends AbsTask<ResultType> implements Progres
         if (callback instanceof Callback.ProgressCallback) {
             this.progressCallback = (Callback.ProgressCallback<ResultType>) callback;
         }
-        if (callback instanceof InterceptRequestListener) {
-            this.interceptRequestListener = (InterceptRequestListener) callback;
+        if (callback instanceof RequestInterceptListener) {
+            this.requestInterceptListener = (RequestInterceptListener) callback;
+        }
+
+        // init tracker
+        {
+            RequestTracker customTracker = params.getRequestTracker();
+            if (customTracker == null) {
+                if (callback instanceof RequestTracker) {
+                    customTracker = (RequestTracker) callback;
+                } else {
+                    customTracker = UriRequestFactory.getDefaultTracker();
+                }
+            }
+            if (customTracker != null) {
+                tracker = new RequestTrackerWrapper(customTracker);
+            }
         }
 
         // init executor
@@ -94,36 +117,57 @@ public class HttpTask<ResultType> extends AbsTask<ResultType> implements Progres
         }
     }
 
-    // 初始化请求参数
-    private UriRequest initRequest() throws Throwable {
-        // get loadType
+    // 解析loadType
+    private void resolveLoadType() {
         Class<?> callBackType = callback.getClass();
         if (callback instanceof Callback.TypedCallback) {
-            loadType = ((Callback.TypedCallback) callback).getResultType();
+            loadType = ((Callback.TypedCallback) callback).getLoadType();
         } else if (callback instanceof Callback.PrepareCallback) {
             loadType = ParameterizedTypeUtil.getParameterizedType(callBackType, Callback.PrepareCallback.class, 0);
         } else {
             loadType = ParameterizedTypeUtil.getParameterizedType(callBackType, Callback.CommonCallback.class, 0);
         }
+    }
 
+    // 初始化请求参数
+    private UriRequest createNewRequest() throws Throwable {
         // init request
         params.init();
         UriRequest result = UriRequestFactory.getUriRequest(params, loadType);
-        result.setCallingClassLoader(callBackType.getClassLoader());
+        result.setCallingClassLoader(callback.getClass().getClassLoader());
         result.setProgressHandler(this);
-
-        // init tracker
-        RequestTracker customTracker = null;
-        if (callback instanceof RequestTracker) {
-            customTracker = (RequestTracker) callback;
-        } else {
-            customTracker = result.getResponseTracker();
-        }
-        if (customTracker != null) {
-            tracker = new RequestTrackerWrapper(customTracker);
-        }
-
+        this.loadingUpdateMaxTimeSpan = params.getLoadingUpdateMaxTimeSpan();
+        this.update(FLAG_REQUEST_CREATED, result);
         return result;
+    }
+
+    // 文件下载冲突检测
+    private void checkDownloadTask() {
+        if (File.class == loadType) {
+            synchronized (DOWNLOAD_TASK) {
+                String downloadTaskKey = this.params.getSaveFilePath();
+                /*{
+                    // 不处理缓存文件下载冲突,
+                    // 缓存文件下载冲突会抛出FileLockedException异常,
+                    // 使用异常处理控制是否重新尝试下载.
+                    if (TextUtils.isEmpty(downloadTaskKey)) {
+                        downloadTaskKey = this.request.getCacheKey();
+                    }
+                }*/
+                if (!TextUtils.isEmpty(downloadTaskKey)) {
+                    WeakReference<HttpTask<?>> taskRef = DOWNLOAD_TASK.get(downloadTaskKey);
+                    if (taskRef != null) {
+                        HttpTask<?> task = taskRef.get();
+                        if (task != null) {
+                            task.cancel();
+                            task.closeRequestSync();
+                        }
+                        DOWNLOAD_TASK.remove(downloadTaskKey);
+                    }
+                    DOWNLOAD_TASK.put(downloadTaskKey, new WeakReference<HttpTask<?>>(this));
+                } // end if (!TextUtils.isEmpty(downloadTaskKey))
+            }
+        }
     }
 
     @Override
@@ -136,7 +180,9 @@ public class HttpTask<ResultType> extends AbsTask<ResultType> implements Progres
 
         // 初始化请求参数
         ResultType result = null;
-        request = initRequest();
+        resolveLoadType();
+        request = createNewRequest();
+        checkDownloadTask();
         // retry 初始化
         boolean retry = true;
         int retryCount = 0;
@@ -282,7 +328,10 @@ public class HttpTask<ResultType> extends AbsTask<ResultType> implements Progres
                     return null;
                 } else {
                     exception = ex;
-                    retry = retryHandler.retryRequest(ex, ++retryCount, this.request);
+                    if (this.isCancelled() && !(exception instanceof Callback.CancelledException)) {
+                        exception = new Callback.CancelledException("canceled by user");
+                    }
+                    retry = retryHandler.retryRequest(exception, ++retryCount, this.request);
                 }
             }
 
@@ -295,20 +344,28 @@ public class HttpTask<ResultType> extends AbsTask<ResultType> implements Progres
         return result;
     }
 
-    private static final int FLAG_CACHE = 1;
-    private static final int FLAG_PROGRESS = 2;
+    private static final int FLAG_REQUEST_CREATED = 1;
+    private static final int FLAG_CACHE = 2;
+    private static final int FLAG_PROGRESS = 3;
 
     @Override
     @SuppressWarnings("unchecked")
     protected void onUpdate(int flag, Object... args) {
         switch (flag) {
+            case FLAG_REQUEST_CREATED: {
+                if (this.tracker != null) {
+                    this.tracker.onRequestCreated((UriRequest) args[0]);
+                }
+                break;
+            }
             case FLAG_CACHE: {
                 synchronized (cacheLock) {
                     try {
+                        ResultType result = (ResultType) args[0];
                         if (tracker != null) {
-                            tracker.onCache(request);
+                            tracker.onCache(request, result);
                         }
-                        trustCache = this.cacheCallback.onCache((ResultType) args[0]);
+                        trustCache = this.cacheCallback.onCache(result);
                     } catch (Throwable ex) {
                         trustCache = false;
                         callback.onError(ex, true);
@@ -316,6 +373,7 @@ public class HttpTask<ResultType> extends AbsTask<ResultType> implements Progres
                         cacheLock.notifyAll();
                     }
                 }
+                break;
             }
             case FLAG_PROGRESS: {
                 if (this.progressCallback != null && args.length == 3) {
@@ -328,6 +386,7 @@ public class HttpTask<ResultType> extends AbsTask<ResultType> implements Progres
                         callback.onError(ex, true);
                     }
                 }
+                break;
             }
             default: {
                 break;
@@ -338,7 +397,7 @@ public class HttpTask<ResultType> extends AbsTask<ResultType> implements Progres
     @Override
     protected void onWaiting() {
         if (tracker != null) {
-            tracker.onWaiting(request);
+            tracker.onWaiting(params);
         }
         if (progressCallback != null) {
             progressCallback.onWaiting();
@@ -348,7 +407,7 @@ public class HttpTask<ResultType> extends AbsTask<ResultType> implements Progres
     @Override
     protected void onStarted() {
         if (tracker != null) {
-            tracker.onStart(request);
+            tracker.onStart(params);
         }
         if (progressCallback != null) {
             progressCallback.onStarted();
@@ -358,7 +417,7 @@ public class HttpTask<ResultType> extends AbsTask<ResultType> implements Progres
     @Override
     protected void onSuccess(ResultType result) {
         if (tracker != null) {
-            tracker.onSuccess(request);
+            tracker.onSuccess(request, result);
         }
         if (result != null) {
             callback.onSuccess(result);
@@ -387,7 +446,12 @@ public class HttpTask<ResultType> extends AbsTask<ResultType> implements Progres
         if (tracker != null) {
             tracker.onFinished(request);
         }
-        closeRequest();
+        x.task().run(new Runnable() {
+            @Override
+            public void run() {
+                closeRequestSync();
+            }
+        });
         callback.onFinished();
     }
 
@@ -400,24 +464,29 @@ public class HttpTask<ResultType> extends AbsTask<ResultType> implements Progres
 
     @Override
     protected void cancelWorks() {
-        closeRequest();
-    }
-
-    private void closeRequest() {
         x.task().run(new Runnable() {
             @Override
             public void run() {
-                clearRawResult();
-                if (requestWorker != null && params.isCancelFast()) {
-                    try {
-                        requestWorker.interrupt();
-                    } catch (Throwable ignored) {
-                    }
-                }
-                // wtf: okhttp close the inputStream be locked by BufferedInputStream#read
-                IOUtil.closeQuietly(request);
+                closeRequestSync();
             }
         });
+    }
+
+    @Override
+    protected boolean isCancelFast() {
+        return params.isCancelFast();
+    }
+
+    private void closeRequestSync() {
+        clearRawResult();
+        if (requestWorker != null && params.isCancelFast()) {
+            try {
+                requestWorker.interrupt();
+            } catch (Throwable ignored) {
+            }
+        }
+        // wtf: okhttp close the inputStream be locked by BufferedInputStream#read
+        IOUtil.closeQuietly(request);
     }
 
     @Override
@@ -431,8 +500,8 @@ public class HttpTask<ResultType> extends AbsTask<ResultType> implements Progres
     }
 
     // ############################### start: region implements ProgressHandler
-    private final static long RATE = 300; // 0.3s
     private long lastUpdateTime;
+    private long loadingUpdateMaxTimeSpan = 300; // 300ms
 
     /**
      * @param total
@@ -456,7 +525,7 @@ public class HttpTask<ResultType> extends AbsTask<ResultType> implements Progres
                 this.update(FLAG_PROGRESS, total, current, request.isLoading());
             } else {
                 long currTime = System.currentTimeMillis();
-                if (currTime - lastUpdateTime >= RATE) {
+                if (currTime - lastUpdateTime >= loadingUpdateMaxTimeSpan) {
                     lastUpdateTime = currTime;
                     this.update(FLAG_PROGRESS, total, current, request.isLoading());
                 }
@@ -509,8 +578,8 @@ public class HttpTask<ResultType> extends AbsTask<ResultType> implements Progres
                 }
 
                 // intercept response
-                if (interceptRequestListener != null) {
-                    interceptRequestListener.beforeRequest(request);
+                if (requestInterceptListener != null) {
+                    requestInterceptListener.beforeRequest(request);
                 }
 
                 try {
@@ -520,8 +589,8 @@ public class HttpTask<ResultType> extends AbsTask<ResultType> implements Progres
                 }
 
                 // intercept response
-                if (interceptRequestListener != null) {
-                    interceptRequestListener.afterRequest(request);
+                if (requestInterceptListener != null) {
+                    requestInterceptListener.afterRequest(request);
                 }
 
                 if (this.ex != null) {
@@ -543,7 +612,7 @@ public class HttpTask<ResultType> extends AbsTask<ResultType> implements Progres
                                     }
                                     // 开始重定向请求
                                     HttpTask.this.params = redirectParams;
-                                    HttpTask.this.request = initRequest();
+                                    HttpTask.this.request = createNewRequest();
                                     this.ex = new HttpRedirectException(errorCode, httpEx.getMessage(), httpEx.getResult());
                                 }
                             } catch (Throwable throwable) {

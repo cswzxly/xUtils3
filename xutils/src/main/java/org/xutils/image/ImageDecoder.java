@@ -47,7 +47,7 @@ public final class ImageDecoder {
     private final static byte[] GIF_HEADER = new byte[]{'G', 'I', 'F'};
     private final static byte[] WEBP_HEADER = new byte[]{'W', 'E', 'B', 'P'};
 
-    private final static Executor THUMB_CACHE_EXECUTOR = new PriorityExecutor(1);
+    private final static Executor THUMB_CACHE_EXECUTOR = new PriorityExecutor(1, true);
     private final static LruDiskCache THUMB_CACHE = LruDiskCache.getDiskCache("xUtils_img_thumb");
 
     static {
@@ -317,7 +317,9 @@ public final class ImageDecoder {
             if (cancelable != null && cancelable.isCancelled()) {
                 throw new Callback.CancelledException("cancelled during decode image");
             }
-            in = new BufferedInputStream(new FileInputStream(file));
+            int buffSize = 1024 * 16;
+            in = new BufferedInputStream(new FileInputStream(file), buffSize);
+            in.mark(buffSize);
             Movie movie = Movie.decodeStream(in);
             if (movie == null) {
                 throw new IOException("decode image error");
